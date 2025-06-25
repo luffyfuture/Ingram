@@ -82,6 +82,7 @@ def fingerprint(ip, port, config):
     # ip: 目标 IP 地址
     # port: 目标端口号
     # config: 应用配置实例，包含指纹规则、超时时间、User-Agent 等
+    logger.debug(f"fingerprint: Starting fingerprinting for {ip}:{port}")
 
     req_dict = {}  # 创建一个字典，用于暂存已获取的 HTTP 响应 (req)，以路径为键，避免对同一路径重复请求
     session = requests.session() # 创建一个 requests.Session 对象，可以保持 TCP 连接，提高效率
@@ -92,12 +93,14 @@ def fingerprint(ip, port, config):
     for rule in config.rules:
         try:
             # 尝试从 req_dict 缓存中获取针对当前规则路径 (rule.path) 的响应
-            req = req_dict.get(rule.path)
+            req = req_dict.get(rule.path) # Try cache first
             if not req: # 如果缓存中没有，则发送新请求
                 # 请求 URL 格式为 http://ip:port/rule.path
                 # verify=False 忽略 SSL 证书验证, allow_redirects=False 通常用于指纹识别，避免跳转到非预期页面
                 target_url = f"http://{ip}:{port}{rule.path}"
+                logger.debug(f"fingerprint: Attempting to GET {target_url} for rule '{rule.product}' (path: {rule.path})")
                 req = session.get(target_url, headers=headers, timeout=config.timeout, verify=False, allow_redirects=False)
+                logger.debug(f"fingerprint: GET {target_url} status: {req.status_code if req else 'NoResponse'}")
 
                 # 如果当前路径 (rule.path) 不在缓存中，并且响应状态码为 200 (OK) (或根据需求调整)
                 # 则将此响应存入缓存 req_dict，供后续具有相同路径的规则使用
@@ -106,15 +109,19 @@ def fingerprint(ip, port, config):
                     req_dict[rule.path] = req
 
             # 调用 _parse 函数，判断当前响应 req 是否符合当前规则的指纹值 (rule.val)
-            if _parse(req, rule.val):
-                # 如果 _parse 返回 True，表示指纹匹配成功，返回该规则定义的产品名称 (rule.product)
+            if req and _parse(req, rule.val): # Ensure req is not None before parsing
+                logger.debug(f"fingerprint: Match found for {ip}:{port} -> {rule.product} with rule value '{rule.val}' on path '{rule.path}'")
                 return rule.product
         except requests.exceptions.RequestException as e: # 捕获 requests 可能抛出的所有请求相关异常
             # 例如 Timeout, ConnectionError 等
-            logger.debug(f"指纹识别请求 {ip}:{port}{rule.path} 失败: {e}") # 使用 debug 级别，因为这可能是常见情况
+            # Ensuring path_to_check is defined for logging, even if req failed early
+            path_for_log = rule.path if 'rule' in locals() and hasattr(rule, 'path') else "unknown_path"
+            logger.debug(f"fingerprint: RequestException for {ip}:{port}{path_for_log} - {e}") # 使用 debug 级别
         except Exception as e:
             # 捕获其他可能的未知错误，例如解析 HTML 或规则字符串时发生的错误
-            logger.error(f"指纹识别过程中发生未知错误 ({ip}:{port}{rule.path}): {e}", exc_info=True) # 使用 error 级别并记录堆栈信息
+            path_for_log = rule.path if 'rule' in locals() and hasattr(rule, 'path') else "unknown_path"
+            logger.error(f"fingerprint: Unknown error during fingerprinting ({ip}:{port}{path_for_log}): {e}", exc_info=True) # 使用 error 级别并记录堆栈信息
 
     # 如果遍历完所有规则后都没有匹配成功，则返回 None，表示未能识别出产品
+    logger.debug(f"fingerprint: No product identified for {ip}:{port}")
     return None

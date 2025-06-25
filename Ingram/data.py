@@ -133,16 +133,18 @@ class Data:
                                 break # 找到了开始点，跳出此循环
 
                     # 产出当前段中剩余的IP
-                    for ip in ips_to_yield_from_current_segment:
-                        yield ip
+                    for ip_addr in ips_to_yield_from_current_segment: # Renamed ip to ip_addr
+                        logger.debug(f"Data._generate_ip: Yielding IP from 'remain' list (segment: '{strip_line}'): {ip_addr}")
+                        yield ip_addr
                     # ips_to_yield_from_current_segment 处理完毕后，后续行应从头开始处理
                     # 接下来的循环会继续从 f 中读取下一行
 
                 # 阶段2: 处理文件中的剩余行 (如果done=0，则从头开始)
                 for line in f: # 如果done>0且已找到断点，此循环会从断点后的下一行开始
                     if (strip_line := line.strip()) and not line.startswith('#'):
-                        for ip in net.get_all_ip(strip_line):
-                            yield ip
+                        for ip_addr in net.get_all_ip(strip_line): # Renamed ip to ip_addr
+                            logger.debug(f"Data._generate_ip: Yielding IP from file line '{strip_line}': {ip_addr}")
+                            yield ip_addr
         except FileNotFoundError:
             logger.error(f"输入文件 {self.config.in_file} 未找到，无法生成IP列表。")
             # yield from () # 返回一个空生成器

@@ -46,22 +46,31 @@ class Core:
 
     def _process_open_port(self, ip: str, port_str: str):
         """处理已确认开放的端口：指纹识别、PoC验证等。"""
-        logger.info(f"{ip} 端口 {port_str} 开放")
+        logger.debug(f"Core._process_open_port: Processing open port {ip}:{port_str}")
+        # logger.info(f"{ip} 端口 {port_str} 开放") # This info log is now effectively covered by debug log + subsequent logs
 
         # 对开放的端口进行指纹识别
         # product 保存识别出的产品名称，如果未识别到则为 None
-        if product := fingerprint(ip, port_str, self.config): # Pass port_str
-            logger.info(f"{ip}:{port_str} 的产品指纹是 {product}")
+        logger.debug(f"Core._process_open_port: Calling fingerprint for {ip}:{port_str}")
+        product = fingerprint(ip, port_str, self.config) # Pass port_str
+        logger.debug(f"Core._process_open_port: Fingerprint result for {ip}:{port_str} -> {product}")
+
+        if product:
+            logger.info(f"{ip}:{port_str} 的产品指纹是 {product}") # Keep this info log for identified product
             verified = False  # 标记此服务是否通过了任何 PoC 的验证
 
             # 遍历该产品对应的所有 PoC (Proof of Concept) 脚本
+            logger.debug(f"Core._process_open_port: Starting PoC checks for product '{product}' on {ip}:{port_str}")
             for poc in self.poc_dict.get(product, []): # Use .get for safety
                 if self.shutdown_event.is_set():  # 在执行每个 PoC 前，再次检查关闭信号
-                    logger.debug(f"PoC 验证 {ip}:{port_str} ({poc.name if hasattr(poc, 'name') else 'unknown poc'}) 因收到关闭信号而中止。")
+                    logger.debug(f"Core._process_open_port: PoC 验证 {ip}:{port_str} ({poc.name if hasattr(poc, 'name') else 'unknown poc'}) 因收到关闭信号而中止。")
                     break  # 如果收到关闭信号，则中断对此服务后续 PoC 的验证
 
-                # 调用 PoC 实例的 verify 方法进行漏洞验证
-                if results := poc.verify(ip, port_str): # Pass port_str
+                poc_name = getattr(poc, 'name', 'UnknownPoC')
+                logger.debug(f"Core._process_open_port: Verifying PoC '{poc_name}' on {ip}:{port_str}")
+                results = poc.verify(ip, port_str) # Pass port_str
+                logger.debug(f"Core._process_open_port: PoC '{poc_name}' verification result for {ip}:{port_str} -> {'Success' if results else 'Failure'}")
+                if results:
                     verified = True  # 标记已通过验证
                     self.data.add_found()  # 发现的漏洞总数加一
                     # 将验证成功的 PoC 结果（通常包括 IP, 端口, 产品, 用户名, 密码, PoC名称等）记录到易受攻击数据中
@@ -70,15 +79,19 @@ class Core:
                     # 如果未禁用快照功能，则将快照任务放入处理管道
                     if not self.config.disable_snapshot:
                         # (poc.exploit, results) 元组包含利用漏洞获取快照的方法和验证结果
+                        logger.debug(f"Core._process_open_port: Adding snapshot task for PoC '{poc_name}' on {ip}:{port_str}")
                         self.snapshot_pipeline.put((poc.exploit, results))
                 # PoC 循环结束
 
             if not verified:  # 如果遍历完所有 PoC 后，该服务均未验证出漏洞
+                logger.debug(f"Core._process_open_port: Product '{product}' on {ip}:{port_str} not verified for any PoC, adding to not_vulnerable.")
                 self.data.add_not_vulnerable([ip, port_str, product]) # Use port_str
         else: # 如果指纹识别未能确定产品
-            logger.debug(f"{ip}:{port_str} 未识别到产品指纹。")
+            logger.debug(f"Core._process_open_port: {ip}:{port_str} 未识别到产品指纹。") # Kept original Chinese log here
+        logger.debug(f"Core._process_open_port: Finished processing for {ip}:{port_str}")
 
     def _scan(self, target: str):
+        logger.debug(f"Core._scan: Starting scan for target: {target}")
         # _scan 方法处理单个目标的扫描逻辑，目标可以是 IP 或 IP:端口 的形式
         items = target.split(':')
         ip = items[0]  # 提取 IP 地址
@@ -89,24 +102,29 @@ class Core:
         # 遍历需要扫描的端口列表
         for port_str in ports_to_scan: # Renamed loop variable to port_str
             if self.shutdown_event.is_set():  # 在处理每个端口前，检查是否已收到关闭信号
-                logger.debug(f"扫描任务 {ip}:{port_str} 因收到关闭信号而中止。")
+                logger.debug(f"Core._scan: Shutdown event set. Aborting further port checks for {ip}.")
                 break  # 如果已收到关闭信号，则中断对此目标后续端口的扫描
 
-            # 调用 port_scan 工具函数，检查当前 IP 和端口是否开放
-            # self.config.timeout 是连接超时时间
-            if port_scan(ip, port_str, self.config.timeout): # Pass port_str
+            logger.debug(f"Core._scan: About to call port_scan for {ip}:{port_str}")
+            is_open = port_scan(ip, port_str, self.config.timeout) # Pass port_str
+            logger.debug(f"Core._scan: port_scan result for {ip}:{port_str} -> {is_open}")
+
+            if is_open:
+                logger.debug(f"Core._scan: Port {ip}:{port_str} is open. Calling _process_open_port.")
                 self._process_open_port(ip, port_str) # Call the new helper method
             # else: # 端口未开放或扫描超时/失败，可以选择性记录日志
-            #     logger.debug(f"{ip} 端口 {port_str} 关闭或不可达。")
+            #     logger.debug(f"Core._scan: {ip} 端口 {port_str} 关闭或不可达。") # Kept original Chinese log here
         # 端口循环结束
+        logger.debug(f"Core._scan: Finished all port checks for target: {target}")
 
         if self.shutdown_event.is_set(): # 检查在完成对此目标所有指定端口的扫描后，是否是因关闭信号而提前结束的
-            logger.info(f"目标 {target} 的扫描因关闭信号而提前结束。")
+            logger.info(f"目标 {target} 的扫描因关闭信号而提前结束。") # This is an INFO log, might be okay
 
         self.data.add_done()  # 标记此目标 (IP) 已完成扫描（无论是否发现漏洞）
         self.data.record_running_state()  # 定期记录当前的运行状态（例如，已完成多少目标）
 
     def run(self):
+        logger.debug("Core.run: Starting Core.run method.") # Added debug log
         logger.info(f"程序运行于 {timer.get_time_formatted()}")
         logger.info(f"当前配置为 {self.config}")
 
@@ -130,13 +148,14 @@ class Core:
 
             # 遍历 IP 生成器提供的每个 IP 地址进行扫描
             for ip_addr in self.data.ip_generator: # Renamed ip to ip_addr to avoid conflict with module
+                logger.debug(f"Core.run: Picked up target '{ip_addr}' from generator.")
                 if self.shutdown_event.is_set(): # 检查是否已收到关闭信号
-                    logger.info("关闭信号已置位，停止分发新的扫描任务。")
+                    logger.info("关闭信号已置位，停止分发新的扫描任务。") # This is an INFO log
                     break  # 如果已收到关闭信号，则停止分发新任务
                 # 为每个 IP 启动一个新的 gevent 协程执行 _scan 方法
                 scan_pool.start(gevent.spawn(self._scan, ip_addr))
 
-            logger.info("所有扫描任务已分发完毕，等待当前执行中的任务完成...")
+            logger.info("所有扫描任务已分发完毕，等待当前执行中的任务完成...") # This is an INFO log
             if scan_pool: # Check if scan_pool was initialized
                 scan_pool.join() # 等待协程池中的所有任务完成
             logger.info("扫描协程池中的所有任务已执行完毕。")

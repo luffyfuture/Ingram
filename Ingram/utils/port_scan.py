@@ -6,6 +6,7 @@ from loguru import logger
 
 
 def port_scan(ip: str, port: str, timeout: int = 1) -> bool:
+    logger.debug(f"port_scan: Attempting to scan {ip}:{port} with timeout {timeout}s")
     # port_scan 函数用于检查指定的 IP 地址和端口号是否开放
     # ip: 目标 IP 地址 (字符串)
     # port: 目标端口号 (字符串，内部会转换为整数)
@@ -29,18 +30,19 @@ def port_scan(ip: str, port: str, timeout: int = 1) -> bool:
         # 需要将端口号从字符串转换为整数
         if s.connect_ex((ip, int(port))) == 0:
             # 如果 connect_ex() 返回 0，表示端口开放且连接成功
+            logger.debug(f"port_scan: Success - {ip}:{port} is open.")
             return True
     except socket.timeout:
         # 捕获 socket.timeout 异常，这通常发生在 s.connect_ex() 超时
-        logger.debug(f"端口扫描 {ip}:{port} 超时 (超时时间: {timeout}s)。")
+        logger.debug(f"port_scan: Timeout - {ip}:{port} (timeout: {timeout}s).") # Changed from info to debug
     except OverflowError:
         # 捕获 int(port) 可能因 port 字符串无法转换为有效整数（例如过大）而抛出的 OverflowError
-        logger.error(f"端口号 '{port}' 无效或过大，无法进行扫描。")
+        logger.error(f"端口号 '{port}' 无效或过大，无法进行扫描。") # This is an error, keep as error
     except Exception as e:
         # 捕获其他所有在 socket 操作或类型转换中可能发生的未知异常
         # 例如，如果 IP 地址格式不正确，某些系统上的 socket 操作可能会失败
         # 或者 int(port) 失败（如果 port 不是数字字符串，会是 ValueError，但 Exception 更通用）
-        logger.error(f"端口扫描 {ip}:{port} 时发生未知错误: {e}", exc_info=True)
+        logger.error(f"端口扫描 {ip}:{port} 时发生未知错误: {e}", exc_info=True) # Keep as error
     finally:
         # finally 块确保无论 try 块中发生什么情况 (成功、异常、返回)，socket 都会被关闭
         # 检查 's' 是否已在当前作用域定义并成功创建 (不为 None)
@@ -48,4 +50,5 @@ def port_scan(ip: str, port: str, timeout: int = 1) -> bool:
             s.close()  # 关闭套接字，释放资源
 
     # 如果端口未成功连接 (例如超时、连接被拒、发生异常等)，则返回 False
+    logger.debug(f"port_scan: Failure or closed - {ip}:{port}.")
     return False
