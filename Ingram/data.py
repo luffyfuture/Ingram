@@ -89,7 +89,8 @@ class Data:
 
 
     def _cal_total(self):
-        # 计算输入文件中目标IP的总数量。
+        # 计算输入文件中目标IP的总数量。此方法在单独的线程中运行。
+        logger.debug("Data._cal_total: Thread started. Calculating total IPs.")
         # 它会读取输入文件 (self.config.in_file)，解析每一行以确定IP段中的IP数量，并累加到 self.total。
         # 支持处理单个IP、IP范围 (如 192.168.1.1-192.168.1.10) 和 CIDR表示法 (如 192.168.1.0/24)。
         # 以 '#' 开头的行被视为注释，将被忽略。
@@ -97,88 +98,112 @@ class Data:
             with open(self.config.in_file, 'r', encoding='utf-8') as f: # 指定编码
                 for line in f:
                     if (strip_line := line.strip()) and not line.startswith('#'):
+                        # logger.debug(f"Data._cal_total: Processing line for total: '{strip_line}'") # Optional: very verbose
                         self.add_total(net.get_ip_seg_len(strip_line))
         except FileNotFoundError:
-            logger.error(f"输入文件 {self.config.in_file} 未找到，无法计算目标总数。")
+            logger.critical(f"Data._cal_total: 输入文件 {self.config.in_file} 未找到!", exc_info=True)
+            # This might leave self.total as 0, which could be problematic.
+            # Consider how Core handles total=0. For now, just log.
         except Exception as e:
-            logger.error(f"计算目标总数时发生错误: {e}", exc_info=True)
+            logger.error(f"Data._cal_total: 计算总IP数时发生错误: {e}", exc_info=True)
+
+        logger.debug(f"Data._cal_total: Thread finished. Calculated total: {self.total}")
 
 
     def _generate_ip(self):
-        # 生成器函数，用于逐个产出待扫描的IP地址。
+        # IP地址生成器，从输入文件中逐个产出IP地址，并支持从上次断点继续。
+        logger.debug("Data._generate_ip: Generator started.") # 新增
         # 它会读取输入文件，并根据已完成的扫描数量 (self.done) 来决定从哪里开始生成IP，
         # 从而支持任务的中断和恢复。
         # 如果 self.done > 0，它会跳过已扫描的IP。
         # 对于每个IP段或单个IP，它使用 net.get_all_ip 来获取所有具体的IP地址。
         current_processed_count = 0 # 当前已处理过的IP数量，用于与self.done比较
         ips_to_yield_from_current_segment = []
+        # strip_line_for_debug will store the line from which 'remain' ips are generated for better context in logs.
+        strip_line_for_debug = "N/A (no resumption or direct file read)"
 
         try:
             with open(self.config.in_file, 'r', encoding='utf-8') as f: # 指定编码
                 # 阶段1: 如果 self.done > 0, 跳过已处理的IP段或部分IP段
                 if self.done > 0:
-                    for line in f:
-                        if (strip_line := line.strip()) and not line.startswith('#'):
-                            segment_len = net.get_ip_seg_len(strip_line)
-                            if current_processed_count + segment_len <= self.done:
-                                current_processed_count += segment_len
-                                continue # 跳过整个IP段
-                            else:
-                                # 定位到 self.done 所在的IP段
-                                ips_in_segment = net.get_all_ip(strip_line)
-                                # 计算此段内需要跳过的IP数量
-                                skip_in_segment = self.done - current_processed_count
-                                # 缓存此段中剩余待处理的IP
-                                ips_to_yield_from_current_segment = ips_in_segment[skip_in_segment:]
-                                break # 找到了开始点，跳出此循环
+                    logger.debug(f"Data._generate_ip: Resuming scan. Done count: {self.done}")
+                    for line_content_from_file in f: # Changed variable name to avoid conflict
+                        strip_line_for_debug = line_content_from_file.strip() # store for debug log context
+                        if not strip_line_for_debug or strip_line_for_debug.startswith('#'):
+                            continue
+                        segment_len = net.get_ip_seg_len(strip_line_for_debug)
+                        if current_processed_count + segment_len <= self.done:
+                            current_processed_count += segment_len
+                            continue # 跳过整个IP段
+                        else:
+                            # 定位到 self.done 所在的IP段
+                            ips_in_segment = net.get_all_ip(strip_line_for_debug)
+                            # 计算此段内需要跳过的IP数量
+                            skip_in_segment = self.done - current_processed_count
+                            # 缓存此段中剩余待处理的IP
+                            ips_to_yield_from_current_segment = ips_in_segment[skip_in_segment:]
+                            logger.debug(f"Data._generate_ip: Resumption point found. Segment: '{strip_line_for_debug}', length: {segment_len}, processed in seg: {skip_in_segment}, remaining in seg: {len(ips_to_yield_from_current_segment)}")
+                            break # 找到了开始点，跳出此循环
 
                     # 产出当前段中剩余的IP
-                    for ip_addr in ips_to_yield_from_current_segment: # Renamed ip to ip_addr
-                        logger.debug(f"Data._generate_ip: Yielding IP from 'remain' list (segment: '{strip_line}'): {ip_addr}")
+                    for ip_addr in ips_to_yield_from_current_segment:
+                        logger.debug(f"Data._generate_ip: Yielding IP from 'remain' list (segment: '{strip_line_for_debug}'): {ip_addr}")
                         yield ip_addr
                     # ips_to_yield_from_current_segment 处理完毕后，后续行应从头开始处理
                     # 接下来的循环会继续从 f 中读取下一行
 
                 # 阶段2: 处理文件中的剩余行 (如果done=0，则从头开始)
-                for line in f: # 如果done>0且已找到断点，此循环会从断点后的下一行开始
-                    if (strip_line := line.strip()) and not line.startswith('#'):
-                        for ip_addr in net.get_all_ip(strip_line): # Renamed ip to ip_addr
-                            logger.debug(f"Data._generate_ip: Yielding IP from file line '{strip_line}': {ip_addr}")
-                            yield ip_addr
+                for line_content_from_file in f: # 如果done>0且已找到断点，此循环会从断点后的下一行开始
+                    strip_line_for_debug = line_content_from_file.strip()
+                    if not strip_line_for_debug or strip_line_for_debug.startswith('#'):
+                        continue
+                    for ip_addr in net.get_all_ip(strip_line_for_debug):
+                        logger.debug(f"Data._generate_ip: Yielding IP from file line '{strip_line_for_debug}': {ip_addr}")
+                        yield ip_addr
         except FileNotFoundError:
-            logger.error(f"输入文件 {self.config.in_file} 未找到，无法生成IP列表。")
-            # yield from () # 返回一个空生成器
+            logger.critical(f"Data._generate_ip: 输入文件 {self.config.in_file} 未找到!", exc_info=True)
+            # This will cause the generator to yield nothing.
         except Exception as e:
-            logger.error(f"生成IP列表时发生错误: {e}", exc_info=True)
-            # yield from ()
+            logger.error(f"Data._generate_ip: 生成IP时发生错误: {e}", exc_info=True)
+
+        logger.debug("Data._generate_ip: Generator finished or input file processed.") # 新增
 
 
     def preprocess(self):
         # 执行预处理任务，为正式扫描做准备。
+        logger.debug("Data.preprocess: Preprocessing started.")
+
         # 1. 打开用于记录结果的文件 (易受攻击列表和未发现漏洞列表)。
         #    使用追加模式 'a'，以便在任务恢复时可以继续写入。
         try:
+            logger.debug(f"Data.preprocess: Opening vulnerable results file: {os.path.join(self.config.out_dir, self.config.vulnerable)}")
             self.vulnerable = open(os.path.join(self.config.out_dir, self.config.vulnerable), 'a', encoding='utf-8')
+            logger.debug(f"Data.preprocess: Opening not_vulnerable results file: {os.path.join(self.config.out_dir, self.config.not_vulnerable)}")
             self.not_vulneralbe = open(os.path.join(self.config.out_dir, self.config.not_vulnerable), 'a', encoding='utf-8')
         except IOError as e:
-            logger.error(f"打开结果文件失败: {e}", exc_info=True)
+            logger.critical(f"Data.preprocess: 打开结果文件失败: {e}", exc_info=True)
             # 如果结果文件无法打开，可能需要决定是否中止程序
             raise # 重新抛出异常，让上层处理或终止程序
 
         # 2. 从磁盘加载上次的运行状态 (如果存在)。
+        logger.debug("Data.preprocess: Loading state from disk.")
         self._load_state_from_disk()
 
         # 3. 在单独的线程中计算目标IP总数，避免阻塞主流程。
         #    这对于非常大的输入列表尤其有用。
+        logger.debug("Data.preprocess: Starting _cal_total thread.")
         cal_thread = Thread(target=self._cal_total)
         cal_thread.start()
 
         # 4. 初始化IP生成器。
-        self.ip_generator = self._generate_ip()
+        logger.debug("Data.preprocess: Initializing ip_generator.")
+        self.ip_generator = self._generate_ip() # 调用 _generate_ip 生成器
 
         # 5. 等待计算总数的线程完成，确保 self.total 在扫描开始前是准确的。
-        cal_thread.join()
-        logger.info(f"预处理完成。目标IP总数: {self.total}。已完成: {self.done}。")
+        logger.debug("Data.preprocess: About to join _cal_total thread.")
+        cal_thread.join() # 等待 _cal_total 线程执行完毕
+        logger.info(f"预处理完成。目标IP总数: {self.total}。已完成: {self.done}。") # Kept original info log
+        logger.debug("Data.preprocess: _cal_total thread joined. Preprocessing complete.")
 
 
     def add_total(self, item=1):
